@@ -1,0 +1,17 @@
+name: Building Verio Heloper
+on: [push]
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+      - run: zig fmt --check .
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+      - run: zig build-exe helper.zig
+
+            
