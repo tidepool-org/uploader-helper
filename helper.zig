@@ -1,5 +1,7 @@
 const std = @import("std");
+const config = @import("config");
 const windows = std.os.windows;
+
 const MAX_PATH = windows.MAX_PATH + 1;
 
 extern "kernel32" fn FindFirstVolumeW(lpBuffer: [*]u16, bufferLength: u32) ?windows.HANDLE;
@@ -258,6 +260,10 @@ pub fn main() !void {
         if (std.mem.eql(u8, data.command, "closeDevice")) {
             try sendReply("info", "Closing device");
             break;
+        }
+
+        if (std.mem.eql(u8, data.command, "getAppVersion")) {
+            try sendReply("info", config.version);
         }
 
         parsed.deinit();

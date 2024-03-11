@@ -15,16 +15,18 @@ jobs:
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2.2.0
       - name: Build executable
-        run: zig build-exe helper.zig
+        run: zig build -Dversion=${GITHUB_REF#refs/tags/}
+        env:
+          GITHUB_REF: ${{ github.ref }}
       - name: Archive production artifacts
         uses: actions/upload-artifact@v4
         with:
           name: verio-helper
-          path: helper.exe
+          path: zig-out/bin/helper.exe
       - name: Release
         uses: softprops/action-gh-release@v2.0.2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: helper.exe
+          files: zig-out/bin/helper.exe
 
             
