@@ -1,4 +1,4 @@
-name: Building Verio Heloper
+name: Building Verio Helper
 on: [push]
 jobs:
   lint:
@@ -10,8 +10,15 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: goto-bus-stop/setup-zig@v2
-      - run: zig build-exe helper.zig
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build exectuable
+        uses: goto-bus-stop/setup-zig@v2
+        run: zig build-exe helper.zig
+      - name: Archive production artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: verio-helper
+          path: helper.exe
 
             
