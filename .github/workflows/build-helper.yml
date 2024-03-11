@@ -5,15 +5,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: goto-bus-stop/setup-zig@v2.2.0
       - run: zig fmt --check .
-  build:
+  build-release:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: goto-bus-stop/setup-zig@v2.2.0
       - name: Build executable
         run: zig build-exe helper.zig
       - name: Archive production artifacts
@@ -21,5 +21,10 @@ jobs:
         with:
           name: verio-helper
           path: helper.exe
+      - name: Release
+        uses: softprops/action-gh-release@v2.0.2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: helper.exe
 
             

@@ -2,8 +2,4 @@
 
 Passes data between Verio range meters and Tidepool web extension
 
-Currently Windows 64-bit only. To build:
-
-```
-zig build-exe verio.zig -target x86_64-windows
-```
+When you use `git tag` and push, GitHub Actions should create a new release with assets. 
