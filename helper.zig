@@ -263,7 +263,7 @@ pub fn main() !void {
         }
 
         if (std.mem.eql(u8, data.command, "getAppVersion")) {
-            try sendReply("info", config.version);
+            try sendReply("version", config.version);
         }
 
         parsed.deinit();
