@@ -15,7 +15,7 @@ jobs:
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2.2.0
       - name: Build executable
-        run: zig build -Dversion=${{ github.ref_name }}
+        run: zig build -Dversion="${{ github.ref_name }}"
         env:
           GITHUB_REF: ${{ github.ref }}
       - name: Archive production artifacts
