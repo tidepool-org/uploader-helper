@@ -1,11 +1,15 @@
 name: Building Uploader Helper
 on: [push]
+env:
+  ZIG_VERSION: 0.12.0-dev.3290+b9cca3b63
 jobs:
   lint:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: goto-bus-stop/setup-zig@v2.2.0
+      - uses: korandoru/setup-zig@v1.6.1
+        with:
+          zig-version: $ZIG_VERSION
       - run: zig fmt --check .
   build-release:
     runs-on: windows-latest
@@ -13,7 +17,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2.2.0
+        uses: korandoru/setup-zig@v1.6.1
+        with:
+          zig-version: $ZIG_VERSION
       - name: Show Zig version
         run: zig version
       - name: Build executable
