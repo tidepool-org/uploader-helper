@@ -4,12 +4,12 @@ env:
   ZIG_VERSION: 0.12.0-dev.3290+b9cca3b63
 jobs:
   lint:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: korandoru/setup-zig@v1.6.1
+      - uses: goto-bus-stop/setup-zig@v2.2.0
         with:
-          zig-version: ${{ env.ZIG_VERSION }}
+          version: ${{ env.ZIG_VERSION }}
       - run: zig fmt --check .
   build-release:
     runs-on: windows-latest
@@ -17,9 +17,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Setup Zig
-        uses: korandoru/setup-zig@v1.6.1
+        uses: goto-bus-stop/setup-zig@v2.2.0
         with:
-          zig-version: ${{ env.ZIG_VERSION }}
+          version: ${{ env.ZIG_VERSION }}
       - name: Show Zig version
         run: zig version
       - name: Build executable
