@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "helper",
         .root_source_file = .{ .path = "helper.zig" },
-        .target = b.resolveTargetQuery(.{ 
+        .target = b.resolveTargetQuery(.{
             .os_tag = .windows,
             .cpu_arch = .x86_64,
         }),
