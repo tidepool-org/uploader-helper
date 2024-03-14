@@ -9,7 +9,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: korandoru/setup-zig@v1.6.1
         with:
-          zig-version: $ZIG_VERSION
+          zig-version: ${{ env.ZIG_VERSION }}
       - run: zig fmt --check .
   build-release:
     runs-on: windows-latest
@@ -19,7 +19,7 @@ jobs:
       - name: Setup Zig
         uses: korandoru/setup-zig@v1.6.1
         with:
-          zig-version: $ZIG_VERSION
+          zig-version: ${{ env.ZIG_VERSION }}
       - name: Show Zig version
         run: zig version
       - name: Build executable
