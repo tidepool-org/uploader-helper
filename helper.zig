@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-2-Clause
+
 const std = @import("std");
 const config = @import("config");
 const windows = std.os.windows;
