@@ -7,3 +7,7 @@ When you use `git tag` and push, GitHub Actions should create a new release with
 ## To publish
 
 Copy `helper.exe` from the GitHub release to `https://github.com/tidepool-org/windows-driver/tree/master/helper`
+
+## To test
+
+Run `node testing.js` to see if compiled `helper.exe` responds to messages

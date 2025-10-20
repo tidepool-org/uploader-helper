@@ -3,13 +3,14 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
     const exe = b.addExecutable(.{
         .name = "helper",
         .root_source_file = .{ .path = "helper.zig" },
-        .target = b.resolveTargetQuery(.{
-            .os_tag = .windows,
-            .cpu_arch = .x86_64,
-        }),
+        .target = target,
+        .optimize = optimize,
     });
 
     const version = b.option([]const u8, "version", "application version string") orelse "0.0.0";
