@@ -9,7 +9,7 @@ const windows = if (is_windows) std.os.windows else struct {};
 
 const MAX_PATH = if (is_windows) std.os.windows.MAX_PATH + 1 else 260;
 
-const HandleType = if (is_windows) std.os.windows.HANDLE else usize;
+const HandleType = if (is_windows) std.os.windows.HANDLE else i32;
 
 // Windows-specific external functions
 const WindowsExterns = if (is_windows) struct {
@@ -33,6 +33,87 @@ const FindError = error{
     FindFailed,
     UnsupportedPlatform,
 };
+
+// Linux-specific structures
+const LinuxDevice = struct {
+    path: [:0]u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *LinuxDevice) void {
+        self.allocator.free(self.path);
+    }
+};
+
+fn findDeviceLinux() !LinuxDevice {
+    const allocator = std.heap.page_allocator;
+
+    // Open /sys/block to enumerate block devices
+    var sys_block_dir = std.fs.openDirAbsolute("/sys/block", .{ .iterate = true }) catch |err| {
+        try sendReply("error", "Failed to open /sys/block directory");
+        return err;
+    };
+    defer sys_block_dir.close();
+
+    var iterator = sys_block_dir.iterate();
+
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .sym_link) continue;
+
+        // Skip loop devices, ram disks, etc - focus on sd* devices (USB mass storage typically shows as sd*)
+        if (!std.mem.startsWith(u8, entry.name, "sd")) continue;
+
+        // Check if it's a removable device
+        const removable_path = try std.fmt.allocPrint(allocator, "/sys/block/{s}/removable", .{entry.name});
+        defer allocator.free(removable_path);
+
+        const removable_file = std.fs.openFileAbsolute(removable_path, .{}) catch continue;
+        defer removable_file.close();
+
+        var removable_buf: [2]u8 = undefined;
+        const bytes_read = try removable_file.readAll(&removable_buf);
+        if (bytes_read == 0 or removable_buf[0] != '1') continue;
+
+        // Try to find vendor information through USB device hierarchy
+        const device_path = try std.fmt.allocPrint(allocator, "/sys/block/{s}/device", .{entry.name});
+        defer allocator.free(device_path);
+
+        // Read the vendor file
+        const vendor_path = try std.fmt.allocPrint(allocator, "{s}/vendor", .{device_path});
+        defer allocator.free(vendor_path);
+
+        const vendor_file = std.fs.openFileAbsolute(vendor_path, .{}) catch continue;
+        defer vendor_file.close();
+
+        var vendor_buf: [256]u8 = undefined;
+        const vendor_bytes = try vendor_file.readAll(&vendor_buf);
+        if (vendor_bytes == 0) continue;
+
+        // Trim whitespace from vendor string
+        const vendor = std.mem.trim(u8, vendor_buf[0..vendor_bytes], &std.ascii.whitespace);
+
+        const info_msg = try std.fmt.allocPrint(allocator, "Found device {s} with vendor: {s}", .{entry.name, vendor});
+        defer allocator.free(info_msg);
+        try sendReply("info", info_msg);
+
+        // Check if this is a LifeScan device
+        if (std.mem.eql(u8, vendor, "LifeScan")) {
+            // Return the device path (e.g., /dev/sdb)
+            const dev_path = try std.fmt.allocPrintZ(allocator, "/dev/{s}", .{entry.name});
+
+            const success_msg = try std.fmt.allocPrint(allocator, "Found LifeScan device at {s}", .{dev_path});
+            defer allocator.free(success_msg);
+            try sendReply("info", success_msg);
+
+            return LinuxDevice{
+                .path = dev_path,
+                .allocator = allocator,
+            };
+        }
+    }
+
+    try sendReply("error", "Could not find LifeScan device");
+    return FindError.FindFailed;
+}
 
 fn findDevice() ![:0]u16 {
     if (!is_windows) {
@@ -137,10 +218,40 @@ fn findDevice() ![:0]u16 {
     return FindError.FindFailed;
 }
 
+var linux_device: ?LinuxDevice = null;
+
+fn openDeviceLinux() !std.fs.File {
+    const device = try findDeviceLinux();
+
+    // Store device info for later cleanup
+    linux_device = device;
+
+    // Open the device with O_DIRECT flag (equivalent to Windows FILE_FLAG_NO_BUFFERING)
+    // This bypasses the page cache and ensures reads get fresh data from the device
+    const flags = std.posix.O{
+        .ACCMODE = .RDWR,
+        .DIRECT = true,
+    };
+
+    const fd = std.posix.open(device.path, flags, 0) catch |err| {
+        try sendReply("error", "Failed to open device file");
+        return err;
+    };
+
+    const file = std.fs.File{ .handle = fd };
+
+    // Flush any cached data
+    const BLKFLSBUF = 0x1261;
+    _ = std.os.linux.ioctl(file.handle, BLKFLSBUF, 0);
+
+    try sendReply("success", "Device opened successfully");
+    return file;
+}
+
 fn openDevice() !HandleType {
     if (!is_windows) {
-        try sendReply("error", "Device opening not supported on this platform");
-        return OpenError.InvalidHandle;
+        const file = try openDeviceLinux();
+        return file.handle;
     }
 
     const FSCTL_LOCK_VOLUME = 0x00090018;
@@ -174,10 +285,40 @@ fn openDevice() !HandleType {
     return handle;
 }
 
+fn checkDeviceLinux(handle: HandleType) !void {
+    const allocator = std.heap.page_allocator;
+    const alignment = 4096;
+    const size = 512;
+
+    const buffer = try allocator.alignedAlloc(u8, alignment, size);
+    defer allocator.free(buffer);
+
+    @memset(buffer, 0);
+
+    try sendReply("info", "Reading from device..");
+
+    // Create a File from the handle to use standard read operations
+    const file = std.fs.File{ .handle = handle };
+
+    // Seek to the beginning of the device
+    try file.seekTo(0);
+
+    // Read data from the device
+    const bytesRead = try file.read(buffer);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const printAllocator = gpa.allocator();
+
+    const slice = try std.fmt.allocPrint(printAllocator, "Read {d} bytes from device.", .{bytesRead});
+    defer printAllocator.free(slice);
+    try sendReply("info", slice);
+    try sendReply("data", buffer[0x2b..0x3b]);
+}
+
 fn checkDevice(handle: HandleType) !void {
     if (!is_windows) {
-        try sendReply("error", "Device checking not supported on this platform");
-        return OpenError.ReadFailed;
+        try checkDeviceLinux(handle);
+        return;
     }
 
     const allocator = std.heap.page_allocator;
@@ -207,10 +348,40 @@ fn checkDevice(handle: HandleType) !void {
     try sendReply("data", buffer[0x2b..0x3b]);
 }
 
+fn retrieveDataLinux(seekOffset: u64, linkLayerFrame: []const u8, handle: HandleType) !void {
+    const allocator = std.heap.page_allocator;
+    const alignment = 4096;
+    const size = 512;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const printAllocator = gpa.allocator();
+
+    const buffer = try allocator.alignedAlloc(u8, alignment, size);
+    defer allocator.free(buffer);
+
+    @memset(buffer, 0);
+    @memcpy(buffer[0..linkLayerFrame.len], linkLayerFrame);
+
+    try sendReply("info", "Sending request");
+
+    // Use pwrite/pread to write/read at specific offset without changing file position
+    // This matches the Windows behavior where WriteFile/ReadFile with offset don't move the pointer
+    _ = try std.posix.pwrite(handle, buffer, seekOffset);
+
+    @memset(buffer, 0);
+
+    const bytesRead = try std.posix.pread(handle, buffer, seekOffset);
+
+    const slice = try std.fmt.allocPrint(printAllocator, "Read {d} bytes from device.", .{bytesRead});
+    defer printAllocator.free(slice);
+    try sendReply("info", slice);
+    try sendReply("data", buffer);
+}
+
 fn retrieveData(seekOffset: u64, linkLayerFrame: []const u8, handle: HandleType) !void {
     if (!is_windows) {
-        try sendReply("error", "Data retrieval not supported on this platform");
-        return OpenError.ReadFailed;
+        try retrieveDataLinux(seekOffset, linkLayerFrame, handle);
+        return;
     }
 
     const allocator = std.heap.page_allocator;
@@ -302,6 +473,15 @@ pub fn main() !void {
     // exit gracefully
     if (is_windows) {
         std.os.windows.CloseHandle(handle);
+    } else {
+        // Close the file handle on Linux
+        const file = std.fs.File{ .handle = handle };
+        file.close();
+
+        // Cleanup the device path allocation
+        if (linux_device) |*dev| {
+            dev.deinit();
+        }
     }
     std.process.exit(0);
 }
