@@ -220,10 +220,7 @@ fn findDeviceMacOS() !MacOSDevice {
                 const data = aligned_buffer[0..bytes_read];
 
                 // Check for LifeScan string anywhere in the data
-                if (std.mem.containsAtLeast(u8, data, 1, "LifeScan") or
-                    std.mem.containsAtLeast(u8, data, 1, "LIFESCAN") or
-                    std.mem.containsAtLeast(u8, data, 1, "OneTouch") or
-                    std.mem.containsAtLeast(u8, data, 1, "lifescan")) {
+                if (std.mem.containsAtLeast(u8, data, 1, "LIFESCAN")) {
                     try sendReply("info", "Found LifeScan device");
 
                     const result_path = try allocator.dupeZ(u8, dev_path);
@@ -234,36 +231,9 @@ fn findDeviceMacOS() !MacOSDevice {
                 }
             }
         }
-
-        // If we didn't find a LifeScan device in external disks, try disk0 as fallback
-        const disk0_name = disk_names.items[0];
-        var path_buf: [256]u8 = undefined;
-        const path_result = try std.fmt.bufPrintZ(&path_buf, "/dev/r{s}", .{disk0_name});
-        const dev_path = path_result;
-
-        const device_file = std.fs.openFileAbsolute(dev_path, .{}) catch {
-            try sendReply("error", "Could not find any accessible LifeScan devices");
-            return FindError.FindFailed;
-        };
-        defer device_file.close();
-
-        var buffer: [512]u8 = undefined;
-        _ = device_file.readAll(&buffer) catch {
-            try sendReply("error", "Could not read from any disk");
-            return FindError.FindFailed;
-        };
-
-        try sendReply("info", "Using fallback device");
-
-        // Keep this path, it will be returned
-        const result_path = try allocator.dupeZ(u8, dev_path);
-        return MacOSDevice{
-            .path = result_path,
-            .allocator = allocator,
-        };
     }
 
-    try sendReply("error", "Could not find any disk devices in /dev");
+    try sendReply("error", "Could not find any LifeScan devices");
     return FindError.FindFailed;
 }
 
