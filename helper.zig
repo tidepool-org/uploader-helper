@@ -5,6 +5,7 @@ const config = @import("config");
 const builtin = @import("builtin");
 
 const is_windows = builtin.os.tag == .windows;
+const is_macos = builtin.os.tag == .macos;
 const windows = if (is_windows) std.os.windows else struct {};
 
 const MAX_PATH = if (is_windows) std.os.windows.MAX_PATH + 1 else 260;
@@ -40,6 +41,16 @@ const LinuxDevice = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *LinuxDevice) void {
+        self.allocator.free(self.path);
+    }
+};
+
+// macOS-specific structures
+const MacOSDevice = struct {
+    path: [:0]u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *MacOSDevice) void {
         self.allocator.free(self.path);
     }
 };
@@ -109,6 +120,62 @@ fn findDeviceLinux() !LinuxDevice {
                 .allocator = allocator,
             };
         }
+    }
+
+    try sendReply("error", "Could not find LifeScan device");
+    return FindError.FindFailed;
+}
+
+fn findDeviceMacOS() !MacOSDevice {
+    const allocator = std.heap.page_allocator;
+
+    // On macOS, we look for disk devices in /dev
+    // LifeScan devices typically appear as external USB drives
+
+    var dev_dir = std.fs.openDirAbsolute("/dev", .{ .iterate = true }) catch |err| {
+        try sendReply("error", "Failed to open /dev directory");
+        return err;
+    };
+    defer dev_dir.close();
+
+    var iterator = dev_dir.iterate();
+
+    // Look for disk devices like disk0, disk1, disk2s1, etc.
+    // On macOS, these are character devices (kind == .char_device) or block devices
+    while (try iterator.next()) |entry| {
+        // Only look at disk entries that start with "disk"
+        if (!std.mem.startsWith(u8, entry.name, "disk")) continue;
+
+        // Skip partitions for now, look for raw disks (skip entries with 's' like disk0s1)
+        if (std.mem.containsAtLeast(u8, entry.name, 1, "s")) continue;
+
+        const dev_path = try std.fmt.allocPrintZ(allocator, "/dev/{s}", .{entry.name});
+
+        // Try to open device to verify it exists and is accessible
+        const device_file = std.fs.openFileAbsolute(dev_path, .{}) catch |err| {
+            allocator.free(dev_path);
+            continue;
+        };
+        device_file.close();
+
+        // For macOS, LifeScan devices will be identified as removable USB mass storage
+        // We'll match any removable disk that could be a LifeScan device
+        // In a real implementation, we'd use IOKit to get more detailed device info
+
+        const success_msg = try std.fmt.allocPrint(allocator, "Checking device at {s}", .{dev_path});
+        defer allocator.free(success_msg);
+        try sendReply("info", success_msg);
+
+        // For now, return the first available disk (assuming it's a LifeScan device)
+        // In production, you'd want to use IOKit or other methods to verify the device
+        const found_msg = try std.fmt.allocPrint(allocator, "Found potential LifeScan device at {s}", .{dev_path});
+        defer allocator.free(found_msg);
+        try sendReply("info", found_msg);
+
+        return MacOSDevice{
+            .path = dev_path,
+            .allocator = allocator,
+        };
     }
 
     try sendReply("error", "Could not find LifeScan device");
@@ -219,6 +286,7 @@ fn findDevice() ![:0]u16 {
 }
 
 var linux_device: ?LinuxDevice = null;
+var macos_device: ?MacOSDevice = null;
 
 fn openDeviceLinux() !std.fs.File {
     const device = try findDeviceLinux();
@@ -248,7 +316,42 @@ fn openDeviceLinux() !std.fs.File {
     return file;
 }
 
+fn openDeviceMacOS() !std.fs.File {
+    const device = try findDeviceMacOS();
+
+    // Store device info for later cleanup
+    macos_device = device;
+
+    // Open the device with read/write access
+    const flags = std.posix.O{
+        .ACCMODE = .RDWR,
+    };
+
+    const fd = std.posix.open(device.path, flags, 0) catch |err| {
+        try sendReply("error", "Failed to open device file");
+        return err;
+    };
+
+    const file = std.fs.File{ .handle = fd };
+
+    // On macOS, use F_NOCACHE to disable caching (equivalent to O_DIRECT on Linux)
+    const F_NOCACHE = 48;
+    _ = std.posix.fcntl(fd, F_NOCACHE, 1) catch {
+        try sendReply("error", "Failed to set F_NOCACHE flag");
+        file.close();
+        return OpenError.InvalidHandle;
+    };
+
+    try sendReply("success", "Device opened successfully");
+    return file;
+}
+
 fn openDevice() !HandleType {
+    if (is_macos) {
+        const file = try openDeviceMacOS();
+        return file.handle;
+    }
+
     if (!is_windows) {
         const file = try openDeviceLinux();
         return file.handle;
@@ -315,7 +418,42 @@ fn checkDeviceLinux(handle: HandleType) !void {
     try sendReply("data", buffer[0x2b..0x3b]);
 }
 
+fn checkDeviceMacOS(handle: HandleType) !void {
+    const allocator = std.heap.page_allocator;
+    const alignment = 4096;
+    const size = 512;
+
+    const buffer = try allocator.alignedAlloc(u8, alignment, size);
+    defer allocator.free(buffer);
+
+    @memset(buffer, 0);
+
+    try sendReply("info", "Reading from device..");
+
+    // Create a File from the handle to use standard read operations
+    const file = std.fs.File{ .handle = handle };
+
+    // Seek to the beginning of the device
+    try file.seekTo(0);
+
+    // Read data from the device
+    const bytesRead = try file.read(buffer);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const printAllocator = gpa.allocator();
+
+    const slice = try std.fmt.allocPrint(printAllocator, "Read {d} bytes from device.", .{bytesRead});
+    defer printAllocator.free(slice);
+    try sendReply("info", slice);
+    try sendReply("data", buffer[0x2b..0x3b]);
+}
+
 fn checkDevice(handle: HandleType) !void {
+    if (is_macos) {
+        try checkDeviceMacOS(handle);
+        return;
+    }
+
     if (!is_windows) {
         try checkDeviceLinux(handle);
         return;
@@ -378,7 +516,42 @@ fn retrieveDataLinux(seekOffset: u64, linkLayerFrame: []const u8, handle: Handle
     try sendReply("data", buffer);
 }
 
+fn retrieveDataMacOS(seekOffset: u64, linkLayerFrame: []const u8, handle: HandleType) !void {
+    const allocator = std.heap.page_allocator;
+    const alignment = 4096;
+    const size = 512;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const printAllocator = gpa.allocator();
+
+    const buffer = try allocator.alignedAlloc(u8, alignment, size);
+    defer allocator.free(buffer);
+
+    @memset(buffer, 0);
+    @memcpy(buffer[0..linkLayerFrame.len], linkLayerFrame);
+
+    try sendReply("info", "Sending request");
+
+    // Use pwrite/pread to write/read at specific offset without changing file position
+    // This matches the Windows behavior where WriteFile/ReadFile with offset don't move the pointer
+    _ = try std.posix.pwrite(handle, buffer, seekOffset);
+
+    @memset(buffer, 0);
+
+    const bytesRead = try std.posix.pread(handle, buffer, seekOffset);
+
+    const slice = try std.fmt.allocPrint(printAllocator, "Read {d} bytes from device.", .{bytesRead});
+    defer printAllocator.free(slice);
+    try sendReply("info", slice);
+    try sendReply("data", buffer);
+}
+
 fn retrieveData(seekOffset: u64, linkLayerFrame: []const u8, handle: HandleType) !void {
+    if (is_macos) {
+        try retrieveDataMacOS(seekOffset, linkLayerFrame, handle);
+        return;
+    }
+
     if (!is_windows) {
         try retrieveDataLinux(seekOffset, linkLayerFrame, handle);
         return;
@@ -473,6 +646,15 @@ pub fn main() !void {
     // exit gracefully
     if (is_windows) {
         std.os.windows.CloseHandle(handle);
+    } else if (is_macos) {
+        // Close the file handle on macOS
+        const file = std.fs.File{ .handle = handle };
+        file.close();
+
+        // Cleanup the device path allocation
+        if (macos_device) |*dev| {
+            dev.deinit();
+        }
     } else {
         // Close the file handle on Linux
         const file = std.fs.File{ .handle = handle };
