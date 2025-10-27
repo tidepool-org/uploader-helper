@@ -131,7 +131,6 @@ fn findDeviceMacOS() !MacOSDevice {
 
     // On macOS, we look for disk devices in /dev
     // LifeScan devices typically appear as external USB drives
-    // We check /var/db/ioreg for device information
 
     var dev_dir = std.fs.openDirAbsolute("/dev", .{ .iterate = true }) catch |err| {
         try sendReply("error", "Failed to open /dev directory");
@@ -141,69 +140,130 @@ fn findDeviceMacOS() !MacOSDevice {
 
     var iterator = dev_dir.iterate();
 
-    // First pass: collect all disk devices
-    var disk_devices = std.ArrayList([:0]u8).init(allocator);
+    // First pass: collect all disk devices without trying to open them
+    // Use a simpler approach: just collect the disk names and reconstruct paths as needed
+    var disk_names = std.ArrayList([]const u8).init(allocator);
     defer {
-        for (disk_devices.items) |item| {
-            allocator.free(item);
+        for (disk_names.items) |name| {
+            allocator.free(name);
         }
-        disk_devices.deinit();
+        disk_names.deinit();
     }
+
+    try sendReply("info", "Starting device enumeration in /dev");
 
     while (try iterator.next()) |entry| {
-        // Only look at disk entries that start with "disk"
+        // Only look at entries that start with "disk"
         if (!std.mem.startsWith(u8, entry.name, "disk")) continue;
 
-        // Skip partitions for now, look for raw disks (skip entries with 's' like disk0s1)
-        if (std.mem.containsAtLeast(u8, entry.name, 1, "s")) continue;
-
-        const dev_path = try std.fmt.allocPrintZ(allocator, "/dev/{s}", .{entry.name});
-
-        // Try to open device to verify it exists and is accessible
-        const device_file = std.fs.openFileAbsolute(dev_path, .{}) catch {
-            allocator.free(dev_path);
-            continue;
-        };
-        device_file.close();
-
-        const check_msg = try std.fmt.allocPrint(allocator, "Found disk device: {s}", .{dev_path});
-        defer allocator.free(check_msg);
-        try sendReply("info", check_msg);
-
-        try disk_devices.append(dev_path);
-    }
-
-    // If we found any disk devices, use the first external one
-    // In a real implementation, we'd check USB vendor IDs via IOKit
-    if (disk_devices.items.len > 0) {
-        // For now, return the first non-system disk (typically disk1 or higher)
-        // disk0 is usually the system drive
-        for (disk_devices.items, 0..) |dev_path, i| {
-            if (i > 0) {
-                const found_msg = try std.fmt.allocPrint(allocator, "Found potential LifeScan device at {s}", .{dev_path});
-                defer allocator.free(found_msg);
-                try sendReply("info", found_msg);
-
-                return MacOSDevice{
-                    .path = dev_path,
-                    .allocator = allocator,
-                };
+        // Skip partitions for now, look for raw disks
+        // Partitions have patterns like disk0s1, disk1s2, etc.
+        // Raw disks are just disk0, disk1, disk2, etc.
+        // Check if there's an 's' after "disk" and some digits
+        var is_partition = false;
+        if (entry.name.len > 4) { // "disk" is 4 chars
+            for (entry.name[4..]) |char| {
+                if (char == 's') {
+                    is_partition = true;
+                    break;
+                }
             }
         }
 
-        // If only disk0 exists, still try it (test environment)
-        const dev_path = disk_devices.items[0];
-        const found_msg = try std.fmt.allocPrint(allocator, "Found potential LifeScan device at {s}", .{dev_path});
-        defer allocator.free(found_msg);
-        try sendReply("info", found_msg);
+        if (is_partition) {
+            continue;
+        }
 
+        // Store a copy of the name
+        const name_copy = try allocator.dupe(u8, entry.name);
+        try disk_names.append(name_copy);
+    }
+
+    // Log summary
+    const enum_msg = try std.fmt.allocPrint(allocator, "Enumeration complete: found {d} raw disk devices", .{disk_names.items.len});
+    defer allocator.free(enum_msg);
+    try sendReply("info", enum_msg);
+
+    // If we found any disk devices, verify they are LifeScan devices
+    if (disk_names.items.len > 0) {
+        // Try each disk, starting with non-system disks (disk1 or higher)
+        for (disk_names.items, 0..) |disk_name, i| {
+            // Skip disk0 and disk1 (typically system drives on macOS)
+            if (i <= 1) {
+                continue;
+            }
+
+            // Build the path manually to avoid allocPrintZ issues
+            var path_buf: [256]u8 = undefined;
+            @memcpy(path_buf[0..6], "/dev/r");
+            @memcpy(path_buf[6..6+disk_name.len], disk_name);
+            path_buf[6 + disk_name.len] = 0;
+            const dev_path = path_buf[0..6+disk_name.len :0];
+
+            // Try to verify it's a LifeScan device by reading from it
+            const verify_file = std.fs.openFileAbsolute(dev_path, .{ .mode = .read_only }) catch {
+                continue;
+            };
+            defer verify_file.close();
+
+            // Try with aligned buffer for device I/O
+            const alignment = 4096;
+            var aligned_buffer = try allocator.alignedAlloc(u8, alignment, 4096);
+            defer allocator.free(aligned_buffer);
+
+            const bytes_read = std.posix.read(verify_file.handle, aligned_buffer) catch {
+                continue;
+            };
+
+            // Look for LifeScan identifiers in the data
+            if (bytes_read > 0) {
+                const data = aligned_buffer[0..bytes_read];
+
+                // Check for LifeScan string anywhere in the data
+                if (std.mem.containsAtLeast(u8, data, 1, "LifeScan") or
+                    std.mem.containsAtLeast(u8, data, 1, "LIFESCAN") or
+                    std.mem.containsAtLeast(u8, data, 1, "OneTouch") or
+                    std.mem.containsAtLeast(u8, data, 1, "lifescan")) {
+                    try sendReply("info", "Found LifeScan device");
+
+                    const result_path = try allocator.dupeZ(u8, dev_path);
+                    return MacOSDevice{
+                        .path = result_path,
+                        .allocator = allocator,
+                    };
+                }
+            }
+        }
+
+        // If we didn't find a LifeScan device in external disks, try disk0 as fallback
+        const disk0_name = disk_names.items[0];
+        var path_buf: [256]u8 = undefined;
+        const path_result = try std.fmt.bufPrintZ(&path_buf, "/dev/r{s}", .{disk0_name});
+        const dev_path = path_result;
+
+        const device_file = std.fs.openFileAbsolute(dev_path, .{}) catch {
+            try sendReply("error", "Could not find any accessible LifeScan devices");
+            return FindError.FindFailed;
+        };
+        defer device_file.close();
+
+        var buffer: [512]u8 = undefined;
+        _ = device_file.readAll(&buffer) catch {
+            try sendReply("error", "Could not read from any disk");
+            return FindError.FindFailed;
+        };
+
+        try sendReply("info", "Using fallback device");
+
+        // Keep this path, it will be returned
+        const result_path = try allocator.dupeZ(u8, dev_path);
         return MacOSDevice{
-            .path = dev_path,
+            .path = result_path,
             .allocator = allocator,
         };
     }
 
-    try sendReply("error", "Could not find any disk devices");
+    try sendReply("error", "Could not find any disk devices in /dev");
     return FindError.FindFailed;
 }
 
@@ -347,21 +407,22 @@ fn openDeviceMacOS() !std.fs.File {
     // Store device info for later cleanup
     macos_device = device;
 
-    // Open the device with read/write access
-    const flags = std.posix.O{
-        .ACCMODE = .RDWR,
+    // Try opening with std.fs which handles the flags better
+    const file = std.fs.openFileAbsolute(device.path, .{
+        .mode = .read_write,
+    }) catch {
+        const file2 = std.fs.openFileAbsolute(device.path, .{
+            .mode = .read_only,
+        }) catch {
+            try sendReply("error", "Failed to open device file");
+            return OpenError.InvalidHandle;
+        };
+        return file2;
     };
-
-    const fd = std.posix.open(device.path, flags, 0) catch |err| {
-        try sendReply("error", "Failed to open device file");
-        return err;
-    };
-
-    const file = std.fs.File{ .handle = fd };
 
     // On macOS, use F_NOCACHE to disable caching (equivalent to O_DIRECT on Linux)
     const F_NOCACHE = 48;
-    _ = std.posix.fcntl(fd, F_NOCACHE, 1) catch {
+    _ = std.posix.fcntl(file.handle, F_NOCACHE, 1) catch {
         try sendReply("error", "Failed to set F_NOCACHE flag");
         file.close();
         return OpenError.InvalidHandle;
