@@ -102,7 +102,7 @@ fn findDeviceLinux() !LinuxDevice {
         // Trim whitespace from vendor string
         const vendor = std.mem.trim(u8, vendor_buf[0..vendor_bytes], &std.ascii.whitespace);
 
-        const info_msg = try std.fmt.allocPrint(allocator, "Found device {s} with vendor: {s}", .{entry.name, vendor});
+        const info_msg = try std.fmt.allocPrint(allocator, "Found device {s} with vendor: {s}", .{ entry.name, vendor });
         defer allocator.free(info_msg);
         try sendReply("info", info_msg);
 
@@ -196,9 +196,9 @@ fn findDeviceMacOS() !MacOSDevice {
             // Build the path manually to avoid allocPrintZ issues
             var path_buf: [256]u8 = undefined;
             @memcpy(path_buf[0..6], "/dev/r");
-            @memcpy(path_buf[6..6+disk_name.len], disk_name);
+            @memcpy(path_buf[6 .. 6 + disk_name.len], disk_name);
             path_buf[6 + disk_name.len] = 0;
-            const dev_path = path_buf[0..6+disk_name.len :0];
+            const dev_path = path_buf[0 .. 6 + disk_name.len :0];
 
             // Try to verify it's a LifeScan device by reading from it
             const verify_file = std.fs.openFileAbsolute(dev_path, .{ .mode = .read_only }) catch {
