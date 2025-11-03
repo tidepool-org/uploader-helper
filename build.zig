@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
         .{ .target = b.resolveTargetQuery(.{ .os_tag = .windows, .cpu_arch = .x86_64 }), .name = "helper" },
         .{ .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = .x86_64 }), .name = "helper-linux" },
         .{ .target = b.resolveTargetQuery(.{ .os_tag = .macos, .cpu_arch = .aarch64 }), .name = "helper-macos-arm64" },
-        .{ .target = b.resolveTargetQuery(.{ .os_tag = .macos, .cpu_arch = .x86_64 }), .name = "helper-macos-x86_64" },
+        .{ .target = b.resolveTargetQuery(.{ .os_tag = .macos, .cpu_arch = .x86_64 }), .name = "helper-macos-x64" },
     };
 
     const version = b.option([]const u8, "version", "application version string") orelse "0.0.0";
