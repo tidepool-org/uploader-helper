@@ -27,7 +27,7 @@ jobs:
       - name: Show Zig version
         run: zig version
       - name: Build executables
-        run: zig build -Dversion="${{ github.ref_name }}"
+        run: zig build -Dversion="${{ github.ref_name }}" -Doptimize=ReleaseFast
         env:
           GITHUB_REF: ${{ github.ref }}
       - name: Archive production artifacts
