@@ -21,17 +21,21 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "application version string") orelse "0.0.0";
 
     for (targets) |target_info| {
-        const exe = b.addExecutable(.{
-            .name = target_info.name,
-            .root_source_file = .{ .path = "helper.zig" },
+        const root_module = b.createModule(.{
+            .root_source_file = b.path("helper.zig"),
             .target = target_info.target,
             .optimize = optimize,
+        });
+
+        const exe = b.addExecutable(.{
+            .name = target_info.name,
+            .root_module = root_module,
         });
 
         const options = b.addOptions();
         options.addOption([]const u8, "version", version);
 
-        exe.root_module.addOptions("config", options);
+        root_module.addOptions("config", options);
 
         b.installArtifact(exe);
     }

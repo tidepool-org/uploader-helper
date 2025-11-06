@@ -3,7 +3,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 
-const helperPath = './zig-out/bin/helper';
+const helperPath = './zig-out/bin/helper-linux';
 
 console.log(`Starting helper: ${helperPath}`);
 

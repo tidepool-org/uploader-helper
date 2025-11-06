@@ -1,7 +1,7 @@
 name: Building Uploader Helper
 on: [push]
 env:
-  ZIG_VERSION: 0.12.0
+  ZIG_VERSION: 0.15.2
 jobs:
   lint:
     runs-on: ubuntu-latest

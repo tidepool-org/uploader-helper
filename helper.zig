@@ -20,8 +20,6 @@ const WindowsExterns = if (is_windows) struct {
     extern "kernel32" fn GetVolumePathNamesForVolumeNameW(volumeName: [*]const u16, volumePathNames: [*]u16, bufferLength: u32, returnLength: *u32) bool;
 } else struct {};
 
-const Allocator = std.mem.allocator;
-
 const OpenError = error{
     InvalidHandle,
     LockFailed,
@@ -38,7 +36,7 @@ const FindError = error{
 // Helper function to allocate aligned buffers for device I/O
 fn allocateAlignedBuffer(size: usize) ![]u8 {
     const allocator = std.heap.page_allocator;
-    const buffer = try allocator.alignedAlloc(u8, Constants.DEVICE_BUFFER_ALIGNMENT, size);
+    const buffer = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(Constants.DEVICE_BUFFER_ALIGNMENT), size);
     @memset(buffer, 0);
     return buffer;
 }
@@ -147,7 +145,7 @@ fn findDeviceLinux() !UnixDevice {
         // Check if this is a LifeScan device
         if (std.mem.eql(u8, vendor, "LifeScan")) {
             // Return the device path (e.g., /dev/sdb)
-            const dev_path = try std.fmt.allocPrintZ(allocator, "/dev/{s}", .{entry.name});
+            const dev_path = try std.fmt.allocPrintSentinel(allocator, "/dev/{s}", .{entry.name}, 0);
 
             try sendReplyFormatted("info", "Found LifeScan device at {s}", .{dev_path});
 
@@ -178,7 +176,7 @@ fn findDeviceMacOS() !UnixDevice {
 
     // First pass: collect all disk devices without trying to open them
     // Use a simpler approach: just collect the disk names and reconstruct paths as needed
-    var disk_names = std.ArrayList([]const u8).init(allocator);
+    var disk_names = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (disk_names.items) |name| {
             allocator.free(name);
@@ -241,8 +239,7 @@ fn findDeviceMacOS() !UnixDevice {
             defer verify_file.close();
 
             // Try with aligned buffer for device I/O
-            const alignment = 4096;
-            var aligned_buffer = try allocator.alignedAlloc(u8, alignment, 4096);
+            var aligned_buffer = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(4096), 4096);
             defer allocator.free(aligned_buffer);
 
             const bytes_read = std.posix.read(verify_file.handle, aligned_buffer) catch {
@@ -294,7 +291,7 @@ fn findDevice() ![:0]u16 {
 
     while (true) {
         // Convert volume name from UTF-16 to UTF-8 for printing
-        const volume_name = std.unicode.utf16leToUtf8Alloc(std.heap.page_allocator, volume_name_buffer[0..]) catch {
+        const volume_name = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, volume_name_buffer[0..]) catch {
             try sendReply("error", "Failed to convert volume name to UTF-8");
             return FindError.ConvertFailed;
         };
@@ -303,7 +300,7 @@ fn findDevice() ![:0]u16 {
         // Get volume path names
         var return_length: u32 = 0;
         if (WindowsExterns.GetVolumePathNamesForVolumeNameW(&volume_name_buffer, &volume_path_names_buffer, volume_path_names_buffer.len, &return_length)) {
-            const volume_path_names = try std.unicode.utf16leToUtf8Alloc(std.heap.page_allocator, volume_path_names_buffer[0..]);
+            const volume_path_names = try std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, volume_path_names_buffer[0..]);
 
             const path = std.mem.sliceTo(volume_path_names, 0);
             std.debug.print("Volume Path Names: {s}\n", .{path});
@@ -318,7 +315,7 @@ fn findDevice() ![:0]u16 {
             const devicePath = try std.fmt.allocPrint(std.heap.page_allocator, "\\\\.\\{s}", .{path[0..2]});
             std.debug.print("Device Path: {s}\n", .{devicePath});
 
-            const path_utf16 = try std.unicode.utf8ToUtf16LeWithNull(std.heap.page_allocator, devicePath);
+            const path_utf16 = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, devicePath);
 
             const volumeHandle = std.os.windows.kernel32.CreateFileW(path_utf16, std.os.windows.GENERIC_READ, std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE, null, std.os.windows.OPEN_EXISTING, std.os.windows.FILE_ATTRIBUTE_NORMAL, null);
 
@@ -557,9 +554,9 @@ fn retrieveData(seekOffset: u64, linkLayerFrame: []const u8, handle: HandleType)
 }
 
 pub fn main() !void {
-    const stdin = std.io.getStdIn().reader();
+    const stdin = std.fs.File.stdin();
     var buffer: [Constants.MAIN_BUFFER_SIZE]u8 = undefined;
-    var handle: HandleType = undefined;
+    var handle: ?HandleType = null;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -595,12 +592,16 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, data.command, "checkDevice")) {
             try sendReply("info", "Checking device");
-            try checkDevice(handle);
+            if (handle) |h| {
+                try checkDevice(h);
+            }
         }
 
         if (std.mem.eql(u8, data.command, "retrieveData")) {
             try sendReply("info", "Retrieving data");
-            try retrieveData(data.seekOffset, &data.request, handle);
+            if (handle) |h| {
+                try retrieveData(data.seekOffset, &data.request, h);
+            }
         }
 
         if (std.mem.eql(u8, data.command, "closeDevice")) {
@@ -617,11 +618,15 @@ pub fn main() !void {
 
     // exit gracefully
     if (is_windows) {
-        std.os.windows.CloseHandle(handle);
+        if (handle) |h| {
+            std.os.windows.CloseHandle(h);
+        }
     } else {
         // Close the file handle on Unix-like systems (Linux and macOS)
-        const file = std.fs.File{ .handle = handle };
-        file.close();
+        if (handle) |h| {
+            const file = std.fs.File{ .handle = h };
+            file.close();
+        }
 
         // Cleanup the device path allocation
         if (unix_device) |*dev| {
@@ -632,13 +637,11 @@ pub fn main() !void {
 }
 
 fn sendReply(msgtype: []const u8, result: []const u8) !void {
-    const stdout = std.io.getStdOut().writer();
+    const stdout = std.fs.File.stdout();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    var string = std.ArrayList(u8).init(allocator);
-    defer string.deinit();
 
     const Reply = struct {
         msgType: []const u8,
@@ -650,10 +653,14 @@ fn sendReply(msgtype: []const u8, result: []const u8) !void {
         .details = result,
     };
 
-    try std.json.stringify(x, .{}, string.writer());
+    const json_string = try std.json.Stringify.valueAlloc(allocator, x, .{});
+    defer allocator.free(json_string);
+    var string = std.array_list.Managed(u8).init(allocator);
+    defer string.deinit();
+    try string.appendSlice(json_string);
 
     var response_length: [4]u8 = undefined;
     std.mem.writeInt(u32, &response_length, @intCast(string.items.len), .little);
     _ = try stdout.write(&response_length);
-    _ = try stdout.writeAll(string.items);
+    try stdout.writeAll(string.items);
 }
