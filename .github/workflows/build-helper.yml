@@ -4,7 +4,7 @@ env:
   ZIG_VERSION: 0.15.2
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: read
     steps:
@@ -14,7 +14,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
       - run: zig fmt --check .
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: write
     steps:
@@ -30,6 +30,8 @@ jobs:
         run: zig build -Dversion="${{ github.ref_name }}" -Doptimize=ReleaseFast
         env:
           GITHUB_REF: ${{ github.ref }}
+      - name: Change permissions for binaries
+        run: chmod +x zig-out/bin/helper-linux zig-out/bin/helper-macos-arm64 zig-out/bin/helper-macos-x64
       - name: Archive production artifacts
         uses: actions/upload-artifact@v4
         with:
