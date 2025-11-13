@@ -32,8 +32,15 @@ jobs:
           GITHUB_REF: ${{ github.ref }}
       - name: Change permissions for binaries
         run: chmod +x zig-out/bin/helper-linux zig-out/bin/helper-macos-arm64 zig-out/bin/helper-macos-x64
+      - name: Organize binaries for zip
+        run: |
+          mkdir -p bin/arm64 bin/x64
+          cp zig-out/bin/helper-linux bin/
+          cp zig-out/bin/helper.exe bin/
+          cp zig-out/bin/helper-macos-arm64 bin/arm64/helper-macos
+          cp zig-out/bin/helper-macos-x64 bin/x64/helper-macos
       - name: Create artifact zip
-        run: zip -r uploader-helper.zip zig-out/bin/
+        run: zip -r uploader-helper.zip bin/
       - name: Archive production artifacts
         uses: actions/upload-artifact@v4
         with:
