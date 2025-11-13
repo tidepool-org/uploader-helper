@@ -27,13 +27,11 @@ jobs:
       - name: Show Zig version
         run: zig version
       - name: Build executables
-        run: zig build -Dversion="${{ github.ref_name }}" -Doptimize=ReleaseFast
+        run: zig build -Dversion="${{ github.ref_name }}"
         env:
           GITHUB_REF: ${{ github.ref }}
       - name: Change permissions for binaries
         run: chmod +x zig-out/bin/helper-linux zig-out/bin/helper-macos-arm64 zig-out/bin/helper-macos-x64
-      - name: Create universal macOS binary
-        run: lipo -create zig-out/bin/helper-macos-arm64 zig-out/bin/helper-macos-x64 -output zig-out/bin/helper-macos
       - name: Create artifact zip
         run: zip -r uploader-helper.zip zig-out/bin/
       - name: Archive production artifacts
