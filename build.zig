@@ -32,6 +32,11 @@ pub fn build(b: *std.Build) void {
             .root_module = root_module,
         });
 
+        // Add space for codesign for macOS builds
+        if (target_info.target.result.os.tag == .macos) {
+            exe.headerpad_max_install_names = true;
+        }
+
         const options = b.addOptions();
         options.addOption([]const u8, "version", version);
 
