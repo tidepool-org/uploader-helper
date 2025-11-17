@@ -6,9 +6,6 @@ const builtin = @import("builtin");
 
 const is_windows = builtin.os.tag == .windows;
 const is_macos = builtin.os.tag == .macos;
-const windows = if (is_windows) std.os.windows else struct {};
-
-const MAX_PATH = if (is_windows) std.os.windows.MAX_PATH + 1 else 260;
 
 const HandleType = if (is_windows) std.os.windows.HANDLE else i32;
 
@@ -239,7 +236,7 @@ fn findDeviceMacOS() !UnixDevice {
             defer verify_file.close();
 
             // Try with aligned buffer for device I/O
-            var aligned_buffer = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(4096), 4096);
+            var aligned_buffer = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(Constants.DEVICE_BUFFER_ALIGNMENT), Constants.MAIN_BUFFER_SIZE);
             defer allocator.free(aligned_buffer);
 
             const bytes_read = std.posix.read(verify_file.handle, aligned_buffer) catch {
@@ -274,6 +271,7 @@ fn findDevice() ![:0]u16 {
         return FindError.UnsupportedPlatform;
     }
 
+    const MAX_PATH = std.os.windows.MAX_PATH + 1;
     const STORAGE_DEVICE_DESCRIPTOR = extern struct { Version: u32, Size: u32, DeviceType: u8, DeviceTypeModifier: u8, RemovableMedia: bool, CommandQueueing: bool, VendorIdOffset: u32, ProductIdOffset: u32, ProductRevisionOffset: u32, SerialNumberOffset: u32, BusType: u8, RawPropertiesLength: u32, RawDeviceProperties: [1]u8 };
 
     var volume_name_buffer: [MAX_PATH]u16 = undefined;
@@ -295,12 +293,14 @@ fn findDevice() ![:0]u16 {
             try sendReply("error", "Failed to convert volume name to UTF-8");
             return FindError.ConvertFailed;
         };
+        defer std.heap.page_allocator.free(volume_name);
         std.debug.print("Volume Name: {s}\n", .{std.mem.sliceTo(volume_name[0..], 0)});
 
         // Get volume path names
         var return_length: u32 = 0;
         if (WindowsExterns.GetVolumePathNamesForVolumeNameW(&volume_name_buffer, &volume_path_names_buffer, volume_path_names_buffer.len, &return_length)) {
             const volume_path_names = try std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, volume_path_names_buffer[0..]);
+            defer std.heap.page_allocator.free(volume_path_names);
 
             const path = std.mem.sliceTo(volume_path_names, 0);
             std.debug.print("Volume Path Names: {s}\n", .{path});
@@ -313,6 +313,7 @@ fn findDevice() ![:0]u16 {
             }
 
             const devicePath = try std.fmt.allocPrint(std.heap.page_allocator, "\\\\.\\{s}", .{path[0..2]});
+            defer std.heap.page_allocator.free(devicePath);
             std.debug.print("Device Path: {s}\n", .{devicePath});
 
             const path_utf16 = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, devicePath);
@@ -321,6 +322,7 @@ fn findDevice() ![:0]u16 {
 
             if (volumeHandle == std.os.windows.INVALID_HANDLE_VALUE) {
                 std.log.err("Failed to open volume", .{});
+                std.heap.page_allocator.free(path_utf16);
                 if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
                     break;
                 }
@@ -340,6 +342,7 @@ fn findDevice() ![:0]u16 {
                 &deviceDescriptor,
             ) catch {
                 std.log.err("Storage query failed", .{});
+                std.heap.page_allocator.free(path_utf16);
                 continue;
             };
 
@@ -357,6 +360,7 @@ fn findDevice() ![:0]u16 {
             if (std.mem.eql(u8, vendorID, "LifeScan")) {
                 return path_utf16;
             }
+            std.heap.page_allocator.free(path_utf16);
         } else {
             std.log.err("Failed to get volume path names", .{});
         }

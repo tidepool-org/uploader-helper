@@ -2,10 +2,26 @@
 
 const { spawn } = require('child_process');
 const path = require('path');
+const os = require('os');
 
-const helperPath = './zig-out/bin/helper-linux';
+// Detect OS and architecture to determine the appropriate binary
+const platform = os.platform();
+const arch = os.arch();
 
-console.log(`Starting helper: ${helperPath}`);
+let filename;
+if (platform === 'win32') {
+  filename = 'helper.exe';
+} else if (platform === 'darwin') {
+  filename = arch === 'arm64' ? 'helper-macos-arm64' : 'helper-macos-x64';
+} else if (platform === 'linux') {
+  filename = 'helper-linux';
+} else {
+  throw new Error(`Unsupported platform: ${platform}`);
+}
+
+const helperPath = `./zig-out/bin/${filename}`;
+
+console.log(`Starting helper: ${helperPath} (detected ${platform} ${arch})`);
 
 const child = spawn(helperPath, [], {
   stdio: ['pipe', 'pipe', 'pipe']

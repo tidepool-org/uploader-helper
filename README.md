@@ -10,4 +10,8 @@ Copy `helper.exe` from the GitHub release to `https://github.com/tidepool-org/wi
 
 ## To test
 
-Run `node testing.js` to see if compiled `helper.exe` responds to messages
+Run `node testing.js` to test the compiled helper binary for your current OS:
+- Windows → tests `helper.exe`
+- macOS ARM64 → tests `helper-macos-arm64`
+- macOS x86_64 → tests `helper-macos-x64`
+- Linux → tests `helper-linux`
