@@ -660,12 +660,9 @@ fn sendReply(msgtype: []const u8, result: []const u8) !void {
 
     const json_string = try std.json.Stringify.valueAlloc(allocator, x, .{});
     defer allocator.free(json_string);
-    var string = std.array_list.Managed(u8).init(allocator);
-    defer string.deinit();
-    try string.appendSlice(json_string);
 
     var response_length: [4]u8 = undefined;
-    std.mem.writeInt(u32, &response_length, @intCast(string.items.len), .little);
+    std.mem.writeInt(u32, &response_length, @intCast(json_string.len), .little);
     _ = try stdout.write(&response_length);
-    try stdout.writeAll(string.items);
+    try stdout.writeAll(json_string);
 }
