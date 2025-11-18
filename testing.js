@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 const { spawn } = require('child_process');
-const path = require('path');
 const os = require('os');
 
 // Detect OS and architecture to determine the appropriate binary

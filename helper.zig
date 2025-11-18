@@ -96,7 +96,7 @@ fn findDeviceLinux() !UnixDevice {
     // Open /sys/block to enumerate block devices
     var sys_block_dir = std.fs.openDirAbsolute("/sys/block", .{ .iterate = true }) catch {
         try sendReply("error", "Failed to open /sys/block directory");
-        return error.OutOfMemory;
+        return FindError.FindFailed;
     };
     defer sys_block_dir.close();
 
@@ -163,9 +163,9 @@ fn findDeviceMacOS() !UnixDevice {
     // On macOS, we look for disk devices in /dev
     // LifeScan devices typically appear as external USB drives
 
-    var dev_dir = std.fs.openDirAbsolute("/dev", .{ .iterate = true }) catch {
+    var dev_dir = std.fs.openDirAbsolute("/dev", .{ .iterate = true }) catch |err| {
         try sendReply("error", "Failed to open /dev directory");
-        return error.OutOfMemory;
+        return err;
     };
     defer dev_dir.close();
 
@@ -216,9 +216,9 @@ fn findDeviceMacOS() !UnixDevice {
     // If we found any disk devices, verify they are LifeScan devices
     if (disk_names.items.len > 0) {
         // Try each disk, starting with non-system disks (disk1 or higher)
-        for (disk_names.items, 0..) |disk_name, i| {
+        for (disk_names.items) |disk_name| {
             // Skip disk0 and disk1 (typically system drives on macOS)
-            if (i <= 1) {
+            if (std.mem.eql(u8, disk_name, "disk0") or std.mem.eql(u8, disk_name, "disk1")) {
                 continue;
             }
 
@@ -279,6 +279,7 @@ fn findDevice() ![:0]u16 {
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const printAllocator = gpa.allocator();
+    defer _ = gpa.deinit();
 
     const find_volume_handle = WindowsExterns.FindFirstVolumeW(&volume_name_buffer, volume_name_buffer.len) orelse {
         try sendReply("error", "Failed to find first volume");
