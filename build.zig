@@ -2,21 +2,46 @@
 
 const std = @import("std");
 
+const Targets = struct {
+    target: std.Build.ResolvedTarget,
+    name: []const u8,
+};
+
 pub fn build(b: *std.Build) void {
-    const exe = b.addExecutable(.{
-        .name = "helper",
-        .root_source_file = .{ .path = "helper.zig" },
-        .target = b.resolveTargetQuery(.{
-            .os_tag = .windows,
-            .cpu_arch = .x86_64,
-        }),
-    });
+    const optimize = b.standardOptimizeOption(.{});
+
+    // Define all targets to build
+    const targets: [4]Targets = .{
+        .{ .target = b.resolveTargetQuery(.{ .os_tag = .windows, .cpu_arch = .x86_64 }), .name = "helper" },
+        .{ .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = .x86_64 }), .name = "helper-linux" },
+        .{ .target = b.resolveTargetQuery(.{ .os_tag = .macos, .cpu_arch = .aarch64 }), .name = "helper-macos-arm64" },
+        .{ .target = b.resolveTargetQuery(.{ .os_tag = .macos, .cpu_arch = .x86_64 }), .name = "helper-macos-x64" },
+    };
 
     const version = b.option([]const u8, "version", "application version string") orelse "0.0.0";
-    const options = b.addOptions();
-    options.addOption([]const u8, "version", version);
 
-    exe.root_module.addOptions("config", options);
+    for (targets) |target_info| {
+        const root_module = b.createModule(.{
+            .root_source_file = b.path("helper.zig"),
+            .target = target_info.target,
+            .optimize = optimize,
+        });
 
-    b.installArtifact(exe);
+        const exe = b.addExecutable(.{
+            .name = target_info.name,
+            .root_module = root_module,
+        });
+
+        // Add space for codesign for macOS builds
+        if (target_info.target.result.os.tag == .macos) {
+            exe.headerpad_max_install_names = true;
+        }
+
+        const options = b.addOptions();
+        options.addOption([]const u8, "version", version);
+
+        root_module.addOptions("config", options);
+
+        b.installArtifact(exe);
+    }
 }
