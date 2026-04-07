@@ -9,12 +9,72 @@ const is_macos = builtin.os.tag == .macos;
 
 const HandleType = if (is_windows) std.os.windows.HANDLE else i32;
 
+// Windows SetupAPI / storage types
+const GUID = extern struct {
+    Data1: u32,
+    Data2: u16,
+    Data3: u16,
+    Data4: [8]u8,
+};
+
+// {53F56307-B6BF-11D0-94F2-00A0C91EFB8B}
+const GUID_DEVINTERFACE_DISK = GUID{
+    .Data1 = 0x53F56307,
+    .Data2 = 0xB6BF,
+    .Data3 = 0x11D0,
+    .Data4 = .{ 0x94, 0xF2, 0x00, 0xA0, 0xC9, 0x1E, 0xFB, 0x8B },
+};
+
+const SP_DEVINFO_DATA = extern struct {
+    cbSize: u32,
+    ClassGuid: GUID,
+    DevInst: u32,
+    Reserved: usize,
+};
+
+const SP_DEVICE_INTERFACE_DATA = extern struct {
+    cbSize: u32,
+    InterfaceClassGuid: GUID,
+    Flags: u32,
+    Reserved: usize,
+};
+
+const STORAGE_DEVICE_NUMBER = extern struct {
+    DeviceType: u32,
+    DeviceNumber: u32,
+    PartitionNumber: u32,
+};
+
+const DIGCF_PRESENT: u32 = 0x2;
+const DIGCF_DEVICEINTERFACE: u32 = 0x10;
+// sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W): always 6 for Unicode builds
+const SP_DEVICE_INTERFACE_DETAIL_DATA_CBSIZE: u32 = 6;
+
 // Windows-specific external functions
 const WindowsExterns = if (is_windows) struct {
-    extern "kernel32" fn FindFirstVolumeW(lpBuffer: [*]u16, bufferLength: u32) ?std.os.windows.HANDLE;
-    extern "kernel32" fn FindNextVolumeW(hFindVolume: std.os.windows.HANDLE, lpBuffer: [*]u16, bufferLength: u32) bool;
-    extern "kernel32" fn FindVolumeClose(hFindVolume: std.os.windows.HANDLE) bool;
-    extern "kernel32" fn GetVolumePathNamesForVolumeNameW(volumeName: [*]const u16, volumePathNames: [*]u16, bufferLength: u32, returnLength: *u32) bool;
+    extern "kernel32" fn GetLogicalDrives() u32;
+    extern "setupapi" fn SetupDiGetClassDevsW(
+        ClassGuid: *const GUID,
+        Enumerator: ?[*:0]const u16,
+        hwndParent: ?std.os.windows.HANDLE,
+        Flags: u32,
+    ) std.os.windows.HANDLE;
+    extern "setupapi" fn SetupDiEnumDeviceInterfaces(
+        DeviceInfoSet: std.os.windows.HANDLE,
+        DeviceInfoData: ?*SP_DEVINFO_DATA,
+        InterfaceClassGuid: *const GUID,
+        MemberIndex: u32,
+        DeviceInterfaceData: *SP_DEVICE_INTERFACE_DATA,
+    ) c_int;
+    extern "setupapi" fn SetupDiGetDeviceInterfaceDetailW(
+        DeviceInfoSet: std.os.windows.HANDLE,
+        DeviceInterfaceData: *SP_DEVICE_INTERFACE_DATA,
+        DeviceInterfaceDetailData: ?*anyopaque,
+        DeviceInterfaceDetailDataSize: u32,
+        RequiredSize: ?*u32,
+        DeviceInfoData: ?*SP_DEVINFO_DATA,
+    ) c_int;
+    extern "setupapi" fn SetupDiDestroyDeviceInfoList(DeviceInfoSet: std.os.windows.HANDLE) c_int;
 } else struct {};
 
 const OpenError = error{
@@ -70,6 +130,7 @@ const Constants = struct {
 
     // Windows ioctl codes
     pub const WINDOWS_IOCTL_STORAGE_QUERY_PROPERTY = 0x2D1400;
+    pub const WINDOWS_IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D1080;
     pub const WINDOWS_FSCTL_LOCK_VOLUME = 0x00090018;
 
     // Device path prefix for macOS
@@ -262,123 +323,162 @@ fn findDeviceMacOS() !UnixDevice {
     return FindError.FindFailed;
 }
 
+// Use SetupAPI to enumerate disk device interfaces and find the LifeScan physical disk number.
+// Avoids FindFirstVolumeW/FindNextVolumeW which trigger AV heuristics.
+fn findLifeScanDiskNumber() !u32 {
+    if (!is_windows) return FindError.UnsupportedPlatform;
+
+    const STORAGE_DEVICE_DESCRIPTOR = extern struct { Version: u32, Size: u32, DeviceType: u8, DeviceTypeModifier: u8, RemovableMedia: bool, CommandQueueing: bool, VendorIdOffset: u32, ProductIdOffset: u32, ProductRevisionOffset: u32, SerialNumberOffset: u32, BusType: u8, RawPropertiesLength: u32, RawDeviceProperties: [1]u8 };
+    const StoragePropertyQuery = packed struct { propertyId: u32, queryType: u32, parameters: u8 = undefined };
+
+    const hDevInfo = WindowsExterns.SetupDiGetClassDevsW(&GUID_DEVINTERFACE_DISK, null, null, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (hDevInfo == std.os.windows.INVALID_HANDLE_VALUE) {
+        try sendReply("error", "SetupDiGetClassDevsW failed");
+        return FindError.FindFailed;
+    }
+    defer _ = WindowsExterns.SetupDiDestroyDeviceInfoList(hDevInfo);
+
+    var memberIndex: u32 = 0;
+    var ifaceData: SP_DEVICE_INTERFACE_DATA = undefined;
+    while (true) : (memberIndex += 1) {
+        ifaceData.cbSize = @sizeOf(SP_DEVICE_INTERFACE_DATA);
+        if (WindowsExterns.SetupDiEnumDeviceInterfaces(hDevInfo, null, &GUID_DEVINTERFACE_DISK, memberIndex, &ifaceData) == 0) break;
+
+        // Two-pass: first call gets required buffer size
+        var requiredSize: u32 = 0;
+        _ = WindowsExterns.SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifaceData, null, 0, &requiredSize, null);
+        if (requiredSize < SP_DEVICE_INTERFACE_DETAIL_DATA_CBSIZE or requiredSize > 4096) continue;
+
+        // Allocate and zero the detail buffer; set cbSize = 6 (Unicode SP_DEVICE_INTERFACE_DETAIL_DATA_W)
+        const detailBuf = try std.heap.page_allocator.alloc(u8, requiredSize);
+        defer std.heap.page_allocator.free(detailBuf);
+        @memset(detailBuf, 0);
+        std.mem.writeInt(u32, detailBuf[0..4], SP_DEVICE_INTERFACE_DETAIL_DATA_CBSIZE, .little);
+
+        if (WindowsExterns.SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifaceData, detailBuf.ptr, requiredSize, null, null) == 0) continue;
+
+        // DevicePath is UTF-16LE starting at byte offset 4; read char-by-char to avoid alignment issues
+        const pathBytes = detailBuf[4..];
+        var charCount: usize = 0;
+        while (charCount * 2 + 2 <= pathBytes.len) : (charCount += 1) {
+            if (std.mem.readInt(u16, pathBytes[charCount * 2 ..][0..2], .little) == 0) break;
+        }
+
+        var pathW: [512:0]u16 = undefined;
+        const copyLen = @min(charCount, pathW.len - 1);
+        for (0..copyLen) |i| {
+            pathW[i] = std.mem.readInt(u16, pathBytes[i * 2 ..][0..2], .little);
+        }
+        pathW[copyLen] = 0;
+
+        // Open device with read access for IOCTL queries
+        const devHandle = std.os.windows.kernel32.CreateFileW(
+            &pathW,
+            std.os.windows.GENERIC_READ,
+            std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE,
+            null,
+            std.os.windows.OPEN_EXISTING,
+            std.os.windows.FILE_ATTRIBUTE_NORMAL,
+            null,
+        );
+        if (devHandle == std.os.windows.INVALID_HANDLE_VALUE) continue;
+        defer std.os.windows.CloseHandle(devHandle);
+
+        // Check vendor ID via storage property query
+        const spq = StoragePropertyQuery{ .propertyId = 0, .queryType = 0 };
+        var deviceDescriptor: [1024]u8 = undefined;
+        std.os.windows.DeviceIoControl(
+            devHandle,
+            Constants.WINDOWS_IOCTL_STORAGE_QUERY_PROPERTY,
+            std.mem.asBytes(&spq),
+            &deviceDescriptor,
+        ) catch continue;
+
+        const desc = std.mem.bytesAsSlice(STORAGE_DEVICE_DESCRIPTOR, deviceDescriptor[0..@sizeOf(STORAGE_DEVICE_DESCRIPTOR)]);
+        const vendorOffset = desc[0].VendorIdOffset;
+        if (vendorOffset == 0 or vendorOffset >= deviceDescriptor.len) continue;
+        const vendorID = std.mem.sliceTo(deviceDescriptor[vendorOffset..], 0);
+        try sendReplyFormatted("info", "SetupAPI disk vendor: {s}", .{vendorID});
+
+        if (!std.mem.eql(u8, vendorID, "LifeScan")) continue;
+
+        // Get physical disk number for later drive-letter matching
+        var sdn = std.mem.zeroes(STORAGE_DEVICE_NUMBER);
+        std.os.windows.DeviceIoControl(
+            devHandle,
+            Constants.WINDOWS_IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            null,
+            std.mem.asBytes(&sdn),
+        ) catch continue;
+
+        try sendReplyFormatted("info", "LifeScan disk number: {d}", .{sdn.DeviceNumber});
+        return sdn.DeviceNumber;
+    }
+
+    try sendReply("error", "Could not find LifeScan disk via SetupAPI");
+    return FindError.FindFailed;
+}
+
 fn findDevice() ![:0]u16 {
     if (!is_windows) {
         try sendReply("error", "Device scanning not supported on this platform");
         return FindError.UnsupportedPlatform;
     }
 
-    const MAX_PATH = std.os.windows.MAX_PATH + 1;
-    const STORAGE_DEVICE_DESCRIPTOR = extern struct { Version: u32, Size: u32, DeviceType: u8, DeviceTypeModifier: u8, RemovableMedia: bool, CommandQueueing: bool, VendorIdOffset: u32, ProductIdOffset: u32, ProductRevisionOffset: u32, SerialNumberOffset: u32, BusType: u8, RawPropertiesLength: u32, RawDeviceProperties: [1]u8 };
+    // Find the LifeScan physical disk number via SetupAPI device interface enumeration
+    const targetDiskNumber = try findLifeScanDiskNumber();
 
-    var volume_name_buffer: [MAX_PATH]u16 = undefined;
-    var volume_path_names_buffer: [MAX_PATH]u16 = undefined;
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const printAllocator = gpa.allocator();
-    defer _ = gpa.deinit();
-
-    const find_volume_handle = WindowsExterns.FindFirstVolumeW(&volume_name_buffer, volume_name_buffer.len) orelse {
-        try sendReply("error", "Failed to find first volume");
+    // Match the disk number to a drive letter using GetLogicalDrives bitmask
+    const driveMask = WindowsExterns.GetLogicalDrives();
+    if (driveMask == 0) {
+        try sendReply("error", "GetLogicalDrives failed");
         return FindError.FindFailed;
-    };
-
-    defer _ = WindowsExterns.FindVolumeClose(find_volume_handle);
-
-    while (true) {
-        // Convert volume name from UTF-16 to UTF-8 for printing
-        const volume_name = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, volume_name_buffer[0..]) catch {
-            try sendReply("error", "Failed to convert volume name to UTF-8");
-            return FindError.ConvertFailed;
-        };
-        defer std.heap.page_allocator.free(volume_name);
-        std.debug.print("Volume Name: {s}\n", .{std.mem.sliceTo(volume_name[0..], 0)});
-
-        // Get volume path names
-        var return_length: u32 = 0;
-        if (WindowsExterns.GetVolumePathNamesForVolumeNameW(&volume_name_buffer, &volume_path_names_buffer, volume_path_names_buffer.len, &return_length)) {
-            const volume_path_names = try std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, volume_path_names_buffer[0..]);
-            defer std.heap.page_allocator.free(volume_path_names);
-
-            const path = std.mem.sliceTo(volume_path_names, 0);
-            std.debug.print("Volume Path Names: {s}\n", .{path});
-
-            if (path.len == 0) {
-                if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
-                    break;
-                }
-                continue;
-            }
-
-            const devicePath = try std.fmt.allocPrint(std.heap.page_allocator, "\\\\.\\{s}", .{path[0..2]});
-            defer std.heap.page_allocator.free(devicePath);
-            std.debug.print("Device Path: {s}\n", .{devicePath});
-
-            const path_utf16 = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, devicePath);
-
-            const volumeHandle = std.os.windows.kernel32.CreateFileW(path_utf16, std.os.windows.GENERIC_READ, std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE, null, std.os.windows.OPEN_EXISTING, std.os.windows.FILE_ATTRIBUTE_NORMAL, null);
-
-            if (volumeHandle == std.os.windows.INVALID_HANDLE_VALUE) {
-                std.log.err("Failed to open volume", .{});
-                std.heap.page_allocator.free(path_utf16);
-                if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
-                    break;
-                }
-                continue;
-            }
-            defer std.os.windows.CloseHandle(volumeHandle);
-
-            const StoragePropertyQuery = packed struct { propertyId: u32, queryType: u32, parameters: u8 = undefined };
-
-            const spq = StoragePropertyQuery{ .propertyId = 0, .queryType = 0 };
-            var deviceDescriptor: [1024]u8 = undefined;
-
-            std.os.windows.DeviceIoControl(
-                volumeHandle,
-                Constants.WINDOWS_IOCTL_STORAGE_QUERY_PROPERTY,
-                std.mem.asBytes(&spq),
-                &deviceDescriptor,
-            ) catch {
-                std.log.err("Storage query failed", .{});
-                std.heap.page_allocator.free(path_utf16);
-                if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
-                    break;
-                }
-                continue;
-            };
-
-            const descriptor = std.mem.bytesAsSlice(STORAGE_DEVICE_DESCRIPTOR, deviceDescriptor[0..@sizeOf(STORAGE_DEVICE_DESCRIPTOR)]);
-            std.debug.print("VendorIdOffset: {d}\n", .{descriptor[0].VendorIdOffset});
-            std.debug.print("Size: {d}\n", .{descriptor[0].Size});
-
-            const offset = descriptor[0].VendorIdOffset;
-            if (offset >= deviceDescriptor.len) {
-                std.heap.page_allocator.free(path_utf16);
-                if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
-                    break;
-                }
-                continue;
-            }
-            const vendorID = std.mem.sliceTo(deviceDescriptor[offset..], 0);
-
-            const slice = try std.fmt.allocPrint(printAllocator, "Vendor ID: {s}\n", .{vendorID});
-            defer printAllocator.free(slice);
-            try sendReply("info", slice);
-
-            if (std.mem.eql(u8, vendorID, "LifeScan")) {
-                return path_utf16;
-            }
-            std.heap.page_allocator.free(path_utf16);
-        } else {
-            std.log.err("Failed to get volume path names", .{});
-        }
-
-        if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
-            break;
-        }
     }
 
-    try sendReply("error", "Could not find device");
+    for (0..26) |i| {
+        const bit: u5 = @intCast(i);
+        if (driveMask & (@as(u32, 1) << bit) == 0) continue;
+
+        const driveLetter: u8 = 'A' + @as(u8, @intCast(i));
+
+        // Build \\.\X: as a sentinel-terminated UTF-16 buffer
+        var drivePath: [6:0]u16 = .{ '\\', '\\', '.', '\\', 0, ':' };
+        drivePath[4] = @as(u16, @intCast(driveLetter));
+
+        const volHandle = std.os.windows.kernel32.CreateFileW(
+            &drivePath,
+            std.os.windows.GENERIC_READ,
+            std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE,
+            null,
+            std.os.windows.OPEN_EXISTING,
+            std.os.windows.FILE_ATTRIBUTE_NORMAL,
+            null,
+        );
+        if (volHandle == std.os.windows.INVALID_HANDLE_VALUE) continue;
+        defer std.os.windows.CloseHandle(volHandle);
+
+        var sdn = std.mem.zeroes(STORAGE_DEVICE_NUMBER);
+        std.os.windows.DeviceIoControl(
+            volHandle,
+            Constants.WINDOWS_IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            null,
+            std.mem.asBytes(&sdn),
+        ) catch continue;
+
+        if (sdn.DeviceNumber != targetDiskNumber) continue;
+
+        try sendReplyFormatted("info", "Found LifeScan volume at {c}:", .{driveLetter});
+        const resultPath = try std.heap.page_allocator.allocSentinel(u16, 6, 0);
+        resultPath[0] = '\\';
+        resultPath[1] = '\\';
+        resultPath[2] = '.';
+        resultPath[3] = '\\';
+        resultPath[4] = @as(u16, @intCast(driveLetter));
+        resultPath[5] = ':';
+        return resultPath;
+    }
+
+    try sendReply("error", "Could not match LifeScan disk to a drive letter");
     return FindError.FindFailed;
 }
 

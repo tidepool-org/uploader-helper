@@ -37,6 +37,11 @@ pub fn build(b: *std.Build) void {
             exe.headerpad_max_install_names = true;
         }
 
+        // Link setupapi for SetupDi device enumeration on Windows
+        if (target_info.target.result.os.tag == .windows) {
+            exe.linkSystemLibrary("setupapi");
+        }
+
         const options = b.addOptions();
         options.addOption([]const u8, "version", version);
 
