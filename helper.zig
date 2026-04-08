@@ -352,7 +352,7 @@ fn findDevice() ![:0]u16 {
             std.debug.print("Size: {d}\n", .{descriptor[0].Size});
 
             const offset = descriptor[0].VendorIdOffset;
-            if (offset >= deviceDescriptor.len) {
+            if (offset == 0 or offset >= deviceDescriptor.len) {
                 std.heap.page_allocator.free(path_utf16);
                 if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
                     break;
