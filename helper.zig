@@ -40,10 +40,7 @@ fn allocateAlignedBuffer(size: usize) ![]u8 {
 
 // Helper function to send formatted reply messages
 fn sendReplyFormatted(comptime msgtype: []const u8, comptime fmt: []const u8, args: anytype) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+    const allocator = std.heap.page_allocator;
     const message = try std.fmt.allocPrint(allocator, fmt, args);
     defer allocator.free(message);
     try sendReply(msgtype, message);
@@ -344,6 +341,9 @@ fn findDevice() ![:0]u16 {
             ) catch {
                 std.log.err("Storage query failed", .{});
                 std.heap.page_allocator.free(path_utf16);
+                if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
+                    break;
+                }
                 continue;
             };
 
@@ -352,6 +352,13 @@ fn findDevice() ![:0]u16 {
             std.debug.print("Size: {d}\n", .{descriptor[0].Size});
 
             const offset = descriptor[0].VendorIdOffset;
+            if (offset == 0 or offset >= deviceDescriptor.len) {
+                std.heap.page_allocator.free(path_utf16);
+                if (!WindowsExterns.FindNextVolumeW(find_volume_handle, &volume_name_buffer, volume_name_buffer.len)) {
+                    break;
+                }
+                continue;
+            }
             const vendorID = std.mem.sliceTo(deviceDescriptor[offset..], 0);
 
             const slice = try std.fmt.allocPrint(printAllocator, "Vendor ID: {s}\n", .{vendorID});
@@ -392,7 +399,7 @@ fn openDeviceLinux() !std.fs.File {
 
     const fd = std.posix.open(device.path, flags, 0) catch {
         try sendReply("error", "Failed to open device file");
-        return error.OutOfMemory;
+        return OpenError.InvalidHandle;
     };
 
     const file = std.fs.File{ .handle = fd };
@@ -449,6 +456,7 @@ fn openDevice() !HandleType {
         try sendReply("error", "Could not find device");
         return err;
     };
+    defer std.heap.page_allocator.free(devicePath);
 
     // Open the volume
     const handle = std.os.windows.kernel32.CreateFileW(devicePath, std.os.windows.GENERIC_READ | std.os.windows.GENERIC_WRITE, std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE, null, std.os.windows.OPEN_EXISTING, std.os.windows.FILE_FLAG_NO_BUFFERING, null);
@@ -587,6 +595,7 @@ pub fn main() !void {
             message,
             .{},
         );
+        defer parsed.deinit();
 
         const data = parsed.value;
 
@@ -596,16 +605,20 @@ pub fn main() !void {
         }
 
         if (std.mem.eql(u8, data.command, "checkDevice")) {
-            try sendReply("info", "Checking device");
             if (handle) |h| {
+                try sendReply("info", "Checking device");
                 try checkDevice(h);
+            } else {
+                try sendReply("error", "Device not open");
             }
         }
 
         if (std.mem.eql(u8, data.command, "retrieveData")) {
-            try sendReply("info", "Retrieving data");
             if (handle) |h| {
+                try sendReply("info", "Retrieving data");
                 try retrieveData(data.seekOffset, &data.request, h);
+            } else {
+                try sendReply("error", "Device not open");
             }
         }
 
@@ -617,8 +630,6 @@ pub fn main() !void {
         if (std.mem.eql(u8, data.command, "getAppVersion")) {
             try sendReply("version", config.version);
         }
-
-        parsed.deinit();
     }
 
     // exit gracefully
@@ -638,15 +649,13 @@ pub fn main() !void {
             dev.deinit();
         }
     }
+    _ = gpa.deinit();
     std.process.exit(0);
 }
 
 fn sendReply(msgtype: []const u8, result: []const u8) !void {
     const stdout = std.fs.File.stdout();
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.page_allocator;
 
     const Reply = struct {
         msgType: []const u8,
